@@ -1,25 +1,33 @@
 /**
  * RealtimeService V2
  *
- * Comprehensive real-time data service using official @polymarket/real-time-data-client.
+ * Comprehensive real-time data service using the new Polymarket CLOB WebSocket:
+ * wss://ws-subscriptions-clob.polymarket.com/ws/market
  *
- * Supports ALL available topics:
- * - clob_market: price_change, agg_orderbook, last_trade_price, tick_size_change, market_created, market_resolved
- * - clob_user: order, trade (requires authentication)
- * - activity: trades, orders_matched
- * - crypto_prices: update (BTC, ETH, etc.)
- * - equity_prices: update (AAPL, etc.)
- * - comments: comment_created, comment_removed, reaction_created, reaction_removed
- * - rfq: request_*, quote_*
+ * This replaces the deprecated @polymarket/real-time-data-client which
+ * connected to ws-live-data.polymarket.com (no longer supports CLOB messages).
+ *
+ * Supported events:
+ * - book: Full orderbook snapshots
+ * - price_change: Price updates when orders placed/cancelled
+ * - last_trade_price: Executed trades
+ * - best_bid_ask: Top of book changes (requires custom_feature_enabled)
+ * - tick_size_change: Price increment changes
+ * - market_created / market_resolved: Market lifecycle events
  */
 
 import { EventEmitter } from 'events';
 import {
-  RealTimeDataClient,
-  type Message,
-  type ClobApiKeyCreds,
-  ConnectionStatus,
-} from '@polymarket/real-time-data-client';
+  ClobWebSocketClient,
+  ClobWSConfig,
+  ClobOrderBookEvent,
+  ClobPriceChangeEvent,
+  ClobLastTradeEvent,
+  ClobTickSizeChangeEvent,
+  ClobMarketCreatedEvent,
+  ClobMarketResolvedEvent,
+  ClobBestBidAskEvent,
+} from '../clients/clob-websocket-client.js';
 import type { PriceUpdate, BookUpdate, Orderbook, OrderbookLevel } from '../core/types.js';
 
 // ============================================================================
@@ -29,7 +37,7 @@ import type { PriceUpdate, BookUpdate, Orderbook, OrderbookLevel } from '../core
 export interface RealtimeServiceConfig {
   /** Auto-reconnect on disconnect (default: true) */
   autoReconnect?: boolean;
-  /** Ping interval in ms (default: 5000) */
+  /** Ping interval in ms (default: 30000) */
   pingInterval?: number;
   /** Enable debug logging (default: false) */
   debug?: boolean;
@@ -83,39 +91,14 @@ export interface MarketEvent {
   timestamp: number;
 }
 
-// User data types (requires authentication)
-export interface UserOrder {
-  orderId: string;
-  market: string;
-  asset: string;
-  side: 'BUY' | 'SELL';
-  price: number;
-  originalSize: number;
-  matchedSize: number;
-  eventType: 'PLACEMENT' | 'UPDATE' | 'CANCELLATION';
-  timestamp: number;
-}
-
-export interface UserTrade {
-  tradeId: string;
-  market: string;
-  outcome: string;
-  price: number;
-  size: number;
-  side: 'BUY' | 'SELL';
-  status: 'MATCHED' | 'MINED' | 'CONFIRMED' | 'RETRYING' | 'FAILED';
-  timestamp: number;
-  transactionHash?: string;
-}
-
 // Activity types
 /**
- * Activity trade from WebSocket
+ * Activity trade from WebSocket / Data API polling
  *
  * 实测验证 (2025-12-28)：proxyWallet 和 name 是顶层字段，不在 trader 对象里
  */
 export interface ActivityTrade {
-  /** Token ID (用于下单) */
+  /** Token ID (used for ordering) */
   asset: string;
   /** Market condition ID */
   conditionId: string;
@@ -155,17 +138,40 @@ export interface ActivityTrade {
   };
 }
 
-// External price types
-export interface CryptoPrice {
-  symbol: string;
+export interface ActivityHandlers {
+  onTrade?: (trade: ActivityTrade) => void;
+  onError?: (error: Error) => void;
+}
+
+// User data types (for future CLOB user channel support)
+export interface UserOrder {
+  orderId: string;
+  market: string;
+  asset: string;
+  side: 'BUY' | 'SELL';
   price: number;
+  originalSize: number;
+  matchedSize: number;
+  eventType: 'PLACEMENT' | 'UPDATE' | 'CANCELLATION';
   timestamp: number;
 }
 
-export interface EquityPrice {
-  symbol: string;
+export interface UserTrade {
+  tradeId: string;
+  market: string;
+  outcome: string;
   price: number;
+  size: number;
+  side: 'BUY' | 'SELL';
+  status: 'MATCHED' | 'MINED' | 'CONFIRMED' | 'RETRYING' | 'FAILED';
   timestamp: number;
+  transactionHash?: string;
+}
+
+export interface UserDataHandlers {
+  onOrder?: (order: UserOrder) => void;
+  onTrade?: (trade: UserTrade) => void;
+  onError?: (error: Error) => void;
 }
 
 // Comment types
@@ -184,6 +190,17 @@ export interface Reaction {
   type: string;
   author?: string;
   timestamp: number;
+}
+
+export interface EquityPrice {
+  symbol: string;
+  price: number;
+  timestamp: number;
+}
+
+export interface EquityPriceHandlers {
+  onPrice?: (price: EquityPrice) => void;
+  onError?: (error: Error) => void;
 }
 
 // RFQ types
@@ -217,6 +234,13 @@ export interface MarketSubscription extends Subscription {
   tokenIds: string[];
 }
 
+// External price types
+export interface CryptoPrice {
+  symbol: string;
+  price: number;
+  timestamp: number;
+}
+
 // Event handler types
 export interface MarketDataHandlers {
   onOrderbook?: (book: OrderbookSnapshot) => void;
@@ -227,24 +251,8 @@ export interface MarketDataHandlers {
   onError?: (error: Error) => void;
 }
 
-export interface UserDataHandlers {
-  onOrder?: (order: UserOrder) => void;
-  onTrade?: (trade: UserTrade) => void;
-  onError?: (error: Error) => void;
-}
-
-export interface ActivityHandlers {
-  onTrade?: (trade: ActivityTrade) => void;
-  onError?: (error: Error) => void;
-}
-
 export interface CryptoPriceHandlers {
   onPrice?: (price: CryptoPrice) => void;
-  onError?: (error: Error) => void;
-}
-
-export interface EquityPriceHandlers {
-  onPrice?: (price: EquityPrice) => void;
   onError?: (error: Error) => void;
 }
 
@@ -253,25 +261,25 @@ export interface EquityPriceHandlers {
 // ============================================================================
 
 export class RealtimeServiceV2 extends EventEmitter {
-  private client: RealTimeDataClient | null = null;
-  private config: RealtimeServiceConfig;
-  private subscriptions: Map<string, Subscription> = new Map();
+  private clobWs: ClobWebSocketClient | null = null;
+  private config: Required<RealtimeServiceConfig>;
+  private subscriptions: Map<string, MarketSubscription> = new Map();
   private subscriptionIdCounter = 0;
   private connected = false;
-
-  // Store subscription messages for reconnection
-  private subscriptionMessages: Map<string, { subscriptions: Array<{ topic: string; type: string; filters?: string; clob_auth?: ClobApiKeyCreds }> }> = new Map();
 
   // Caches
   private priceCache: Map<string, PriceUpdate> = new Map();
   private bookCache: Map<string, OrderbookSnapshot> = new Map();
   private lastTradeCache: Map<string, LastTradeInfo> = new Map();
 
+  // Handler tracking for unsubscribe
+  private handlerRegistry: Map<string, Array<{ event: string; handler: Function }>> = new Map();
+
   constructor(config: RealtimeServiceConfig = {}) {
     super();
     this.config = {
       autoReconnect: config.autoReconnect ?? true,
-      pingInterval: config.pingInterval ?? 5000,
+      pingInterval: config.pingInterval ?? 30000,
       debug: config.debug ?? false,
     };
   }
@@ -281,36 +289,61 @@ export class RealtimeServiceV2 extends EventEmitter {
   // ============================================================================
 
   /**
-   * Connect to WebSocket server
+   * Connect to the CLOB WebSocket server
    */
   connect(): this {
-    if (this.client) {
+    if (this.clobWs) {
       this.log('Already connected or connecting');
       return this;
     }
 
-    this.client = new RealTimeDataClient({
-      onConnect: this.handleConnect.bind(this),
-      onMessage: this.handleMessage.bind(this),
-      onStatusChange: this.handleStatusChange.bind(this),
+    const wsConfig: ClobWSConfig = {
       autoReconnect: this.config.autoReconnect,
       pingInterval: this.config.pingInterval,
+      debug: this.config.debug,
+    };
+
+    this.clobWs = new ClobWebSocketClient(wsConfig);
+
+    this.clobWs.on('connected', () => {
+      this.connected = true;
+      this.log('Connected to CLOB WebSocket server');
+      this.emit('connected');
     });
 
-    this.client.connect();
+    this.clobWs.on('disconnected', () => {
+      this.connected = false;
+      this.log('Disconnected from CLOB WebSocket server');
+      this.emit('disconnected');
+    });
+
+    this.clobWs.on('reconnecting', (data: { attempt: number }) => {
+      this.log(`Reconnecting... (attempt ${data.attempt})`);
+      this.emit('reconnecting', data);
+    });
+
+    this.clobWs.on('error', (error: Error) => {
+      this.log(`WebSocket error: ${error.message}`);
+      this.emit('error', error);
+    });
+
+    // Set up event handlers for CLOB WebSocket
+    this.setupClobEventHandlers();
+
+    this.clobWs.connect();
     return this;
   }
 
   /**
-   * Disconnect from WebSocket server
+   * Disconnect from the CLOB WebSocket server
    */
   disconnect(): void {
-    if (this.client) {
-      this.client.disconnect();
-      this.client = null;
+    if (this.clobWs) {
+      this.clobWs.disconnect();
+      this.clobWs = null;
       this.connected = false;
       this.subscriptions.clear();
-      this.subscriptionMessages.clear();  // Clear reconnection list
+      this.handlerRegistry.clear();
     }
   }
 
@@ -322,7 +355,71 @@ export class RealtimeServiceV2 extends EventEmitter {
   }
 
   // ============================================================================
-  // Market Data Subscriptions (clob_market)
+  // CLOB Event Handlers Setup
+  // ============================================================================
+
+  /**
+   * Set up handlers for all CLOB WebSocket event types
+   */
+  private setupClobEventHandlers(): void {
+    if (!this.clobWs) return;
+
+    // Orderbook updates
+    this.clobWs.on('book', (event: ClobOrderBookEvent) => {
+      const book = this.parseOrderbook(event);
+      this.bookCache.set(book.assetId, book);
+      this.emit('orderbook', book);
+    });
+
+    // Price changes
+    this.clobWs.on('price_change', (event: ClobPriceChangeEvent) => {
+      const change = this.parsePriceChange(event);
+      this.emit('priceChange', change);
+    });
+
+    // Last trade
+    this.clobWs.on('last_trade_price', (event: ClobLastTradeEvent) => {
+      const trade = this.parseLastTrade(event);
+      this.lastTradeCache.set(trade.assetId, trade);
+      this.emit('lastTrade', trade);
+    });
+
+    // Best bid/ask
+    this.clobWs.on('best_bid_ask', (event: ClobBestBidAskEvent) => {
+      this.handleBestBidAsk(event);
+    });
+
+    // Tick size changes
+    this.clobWs.on('tick_size_change', (event: ClobTickSizeChangeEvent) => {
+      const change = this.parseTickSizeChange(event);
+      this.emit('tickSizeChange', change);
+    });
+
+    // Market created
+    this.clobWs.on('market_created', (event: ClobMarketCreatedEvent) => {
+      const marketEvent: MarketEvent = {
+        conditionId: event.market,
+        type: 'created',
+        data: event as unknown as Record<string, unknown>,
+        timestamp: this.normalizeTimestamp(event.timestamp),
+      };
+      this.emit('marketEvent', marketEvent);
+    });
+
+    // Market resolved
+    this.clobWs.on('market_resolved', (event: ClobMarketResolvedEvent) => {
+      const marketEvent: MarketEvent = {
+        conditionId: event.market,
+        type: 'resolved',
+        data: event as unknown as Record<string, unknown>,
+        timestamp: this.normalizeTimestamp(event.timestamp),
+      };
+      this.emit('marketEvent', marketEvent);
+    });
+  }
+
+  // ============================================================================
+  // Market Data Subscriptions
   // ============================================================================
 
   /**
@@ -332,19 +429,11 @@ export class RealtimeServiceV2 extends EventEmitter {
    */
   subscribeMarkets(tokenIds: string[], handlers: MarketDataHandlers = {}): MarketSubscription {
     const subId = `market_${++this.subscriptionIdCounter}`;
-    const filterStr = JSON.stringify(tokenIds);
 
-    // Subscribe to all market data types
-    const subscriptions = [
-      { topic: 'clob_market', type: 'agg_orderbook', filters: filterStr },
-      { topic: 'clob_market', type: 'price_change', filters: filterStr },
-      { topic: 'clob_market', type: 'last_trade_price', filters: filterStr },
-      { topic: 'clob_market', type: 'tick_size_change', filters: filterStr },
-    ];
-
-    const subMsg = { subscriptions };
-    this.sendSubscription(subMsg);
-    this.subscriptionMessages.set(subId, subMsg);  // Store for reconnection
+    // Subscribe to assets via CLOB WebSocket
+    if (this.clobWs) {
+      this.clobWs.subscribeAssets(tokenIds);
+    }
 
     // Register handlers
     const orderbookHandler = (book: OrderbookSnapshot) => {
@@ -376,19 +465,24 @@ export class RealtimeServiceV2 extends EventEmitter {
     this.on('lastTrade', lastTradeHandler);
     this.on('tickSizeChange', tickSizeHandler);
 
+    // Track handlers for unsubscribe
+    this.handlerRegistry.set(subId, [
+      { event: 'orderbook', handler: orderbookHandler },
+      { event: 'priceChange', handler: priceChangeHandler },
+      { event: 'lastTrade', handler: lastTradeHandler },
+      { event: 'tickSizeChange', handler: tickSizeHandler },
+    ]);
+
     const subscription: MarketSubscription = {
       id: subId,
       topic: 'clob_market',
       type: '*',
       tokenIds,
       unsubscribe: () => {
-        this.off('orderbook', orderbookHandler);
-        this.off('priceChange', priceChangeHandler);
-        this.off('lastTrade', lastTradeHandler);
-        this.off('tickSizeChange', tickSizeHandler);
-        this.sendUnsubscription({ subscriptions });
+        this.removeHandlers(subId);
+        this.clobWs?.unsubscribeAssets(tokenIds);
         this.subscriptions.delete(subId);
-        this.subscriptionMessages.delete(subId);  // Remove from reconnection list
+        this.handlerRegistry.delete(subId);
       },
     };
 
@@ -488,354 +582,200 @@ export class RealtimeServiceV2 extends EventEmitter {
   subscribeMarketEvents(handlers: { onMarketEvent?: (event: MarketEvent) => void }): Subscription {
     const subId = `market_event_${++this.subscriptionIdCounter}`;
 
-    const subscriptions = [
-      { topic: 'clob_market', type: 'market_created' },
-      { topic: 'clob_market', type: 'market_resolved' },
-    ];
-
-    this.sendSubscription({ subscriptions });
-
+    // Market events are automatically received via CLOB WebSocket
+    // when subscribed to assets. We just need to register the handler.
     const handler = (event: MarketEvent) => handlers.onMarketEvent?.(event);
     this.on('marketEvent', handler);
+
+    this.handlerRegistry.set(subId, [
+      { event: 'marketEvent', handler },
+    ]);
 
     const subscription: Subscription = {
       id: subId,
       topic: 'clob_market',
       type: 'lifecycle',
       unsubscribe: () => {
-        this.off('marketEvent', handler);
-        this.sendUnsubscription({ subscriptions });
+        this.removeHandlers(subId);
         this.subscriptions.delete(subId);
+        this.handlerRegistry.delete(subId);
       },
     };
 
-    this.subscriptions.set(subId, subscription);
+    this.subscriptions.set(subId, subscription as MarketSubscription);
     return subscription;
   }
 
   // ============================================================================
-  // User Data Subscriptions (clob_user) - Requires Authentication
+  // Crypto Price Subscriptions (via REST polling - not available in CLOB WS)
   // ============================================================================
 
   /**
-   * Subscribe to user order and trade events
-   * @param credentials - CLOB API credentials
+   * Subscribe to crypto price updates via CoinGecko REST API polling.
+   * The new CLOB WebSocket doesn't support crypto_prices, so we use polling.
+   *
+   * @param symbols - Array of symbols (e.g., ['BTC', 'ETH', 'SOL'])
    * @param handlers - Event handlers
    */
-  subscribeUserEvents(credentials: ClobApiKeyCreds, handlers: UserDataHandlers = {}): Subscription {
-    const subId = `user_${++this.subscriptionIdCounter}`;
+  subscribeCryptoPrices(symbols: string[], handlers: CryptoPriceHandlers = {}): Subscription {
+    const subId = `crypto_${++this.subscriptionIdCounter}`;
 
-    const subscriptions = [
-      { topic: 'clob_user', type: '*', clob_auth: credentials },
-    ];
+    // Map symbols to CoinGecko IDs and back
+    const symbolToId: Record<string, string> = {
+      'BTC': 'bitcoin',
+      'ETH': 'ethereum',
+      'SOL': 'solana',
+    };
 
-    this.sendSubscription({ subscriptions });
+    const idToSymbol: Record<string, string> = {
+      'bitcoin': 'BTC',
+      'ethereum': 'ETH',
+      'solana': 'SOL',
+    };
 
-    const orderHandler = (order: UserOrder) => handlers.onOrder?.(order);
-    const tradeHandler = (trade: UserTrade) => handlers.onTrade?.(trade);
+    const coinIds = symbols
+      .map((s) => symbolToId[s.toUpperCase()] || s.toLowerCase())
+      .filter(Boolean);
 
-    this.on('userOrder', orderHandler);
-    this.on('userTrade', tradeHandler);
+    const pollInterval = setInterval(async () => {
+      try {
+        const response = await fetch(
+          `https://api.coingecko.com/api/v3/simple/price?ids=${coinIds.join(',')}&vs_currencies=usd`
+        );
+        const data = await response.json() as Record<string, { usd: number }>;
+
+        for (const [coinId, priceData] of Object.entries(data)) {
+          const normalizedSymbol = idToSymbol[coinId] || coinId.toUpperCase();
+          const price: CryptoPrice = {
+            symbol: normalizedSymbol,
+            price: priceData.usd,
+            timestamp: Date.now(),
+          };
+          handlers.onPrice?.(price);
+          this.emit('cryptoPrice', price);
+        }
+      } catch (error) {
+        this.log(`Failed to fetch crypto prices: ${error}`);
+      }
+    }, 3000); // Poll every 3 seconds
 
     const subscription: Subscription = {
       id: subId,
-      topic: 'clob_user',
-      type: '*',
+      topic: 'crypto_prices',
+      type: 'update',
       unsubscribe: () => {
-        this.off('userOrder', orderHandler);
-        this.off('userTrade', tradeHandler);
-        this.sendUnsubscription({ subscriptions });
+        clearInterval(pollInterval);
         this.subscriptions.delete(subId);
       },
     };
 
-    this.subscriptions.set(subId, subscription);
+    this.subscriptions.set(subId, subscription as MarketSubscription);
     return subscription;
   }
 
+  /**
+   * Subscribe to Chainlink crypto prices.
+   * Note: The new CLOB WebSocket doesn't support crypto_prices_chainlink topic.
+   * This method delegates to subscribeCryptoPrices for backward compatibility.
+   *
+   * @param symbols - Array of symbols (e.g., ['ETH/USD', 'BTC/USD'])
+   */
+  subscribeCryptoChainlinkPrices(symbols: string[], handlers: CryptoPriceHandlers = {}): Subscription {
+    // Normalize symbols: 'ETH/USD' -> 'ETH', 'BTC/USD' -> 'BTC'
+    const normalizedSymbols = symbols.map((s) => s.replace('/USD', '').toUpperCase());
+
+    return this.subscribeCryptoPrices(normalizedSymbols, {
+      onPrice: (price: CryptoPrice) => {
+        // Re-emit with /USD suffix for backward compatibility with DipArb
+        const chainlinkPrice: CryptoPrice = {
+          symbol: `${price.symbol}/USD`,
+          price: price.price,
+          timestamp: price.timestamp,
+        };
+        handlers.onPrice?.(chainlinkPrice);
+      },
+      onError: handlers.onError,
+    });
+  }
+
   // ============================================================================
-  // Activity Subscriptions (trades, orders_matched)
+  // Activity Subscriptions (via Data API polling)
   // ============================================================================
 
   /**
-   * Subscribe to trading activity for a market or event
-   * @param filter - Event or market slug (optional - if empty, subscribes to all activity)
+   * Subscribe to ALL trading activity across all markets.
+   * Uses Data API /trades endpoint polling since the new CLOB WebSocket
+   * doesn't support the activity topic.
+   *
+   * This is useful for Copy Trading / Smart Money monitoring.
+   *
    * @param handlers - Event handlers
    */
-  subscribeActivity(
-    filter: { eventSlug?: string; marketSlug?: string } = {},
-    handlers: ActivityHandlers = {}
-  ): Subscription {
+  subscribeAllActivity(handlers: ActivityHandlers = {}): Subscription {
     const subId = `activity_${++this.subscriptionIdCounter}`;
 
-    // Build filter object with snake_case keys (as expected by the server)
-    // Only include filters if we have actual filter values
-    const hasFilter = filter.eventSlug || filter.marketSlug;
-    const filterObj: Record<string, string> = {};
-    if (filter.eventSlug) filterObj.event_slug = filter.eventSlug;
-    if (filter.marketSlug) filterObj.market_slug = filter.marketSlug;
+    let lastTimestamp = Math.floor(Date.now() / 1000) - 60; // Start 60 seconds ago
 
-    // Create subscription objects - only include filters field if we have filters
-    const subscriptions = hasFilter
-      ? [
-          { topic: 'activity', type: 'trades', filters: JSON.stringify(filterObj) },
-          { topic: 'activity', type: 'orders_matched', filters: JSON.stringify(filterObj) },
-        ]
-      : [
-          { topic: 'activity', type: 'trades' },
-          { topic: 'activity', type: 'orders_matched' },
-        ];
+    const pollInterval = setInterval(async () => {
+      try {
+        // Fetch recent trades from Data API
+        const response = await fetch(
+          `https://data-api.polymarket.com/trades?limit=200&startTimestamp=${lastTimestamp * 1000}`
+        );
 
-    this.sendSubscription({ subscriptions });
+        if (!response.ok) {
+          this.log(`Failed to fetch trades: ${response.status}`);
+          return;
+        }
 
-    const handler = (trade: ActivityTrade) => handlers.onTrade?.(trade);
-    this.on('activityTrade', handler);
+        const trades = await response.json() as Array<Record<string, unknown>>;
+
+        for (const rawTrade of trades) {
+          const tradeTimestamp = Math.floor(
+            this.normalizeTimestamp(rawTrade.timestamp) / 1000
+          );
+
+          // Skip old trades (already processed)
+          if (tradeTimestamp <= lastTimestamp) continue;
+
+          const activityTrade: ActivityTrade = {
+            asset: (rawTrade.token_id as string) || '',
+            conditionId: (rawTrade.condition_id as string) || '',
+            eventSlug: (rawTrade.event_slug as string) || '',
+            marketSlug: (rawTrade.slug as string) || '',
+            outcome: (rawTrade.outcome as string) || '',
+            price: Number(rawTrade.price) || 0,
+            side: (rawTrade.side as 'BUY' | 'SELL') || 'BUY',
+            size: Number(rawTrade.size) || 0,
+            timestamp: tradeTimestamp,
+            transactionHash: (rawTrade.transaction_hash as string) || '',
+            trader: {
+              name: (rawTrade.name as string) || undefined,
+              address: (rawTrade.proxy_wallet as string) || undefined,
+            },
+          };
+
+          handlers.onTrade?.(activityTrade);
+          this.emit('activityTrade', activityTrade);
+
+          lastTimestamp = Math.max(lastTimestamp, tradeTimestamp);
+        }
+      } catch (error) {
+        this.log(`Failed to poll trades: ${error}`);
+      }
+    }, 5000); // Poll every 5 seconds
 
     const subscription: Subscription = {
       id: subId,
       topic: 'activity',
       type: '*',
       unsubscribe: () => {
-        this.off('activityTrade', handler);
-        this.sendUnsubscription({ subscriptions });
+        clearInterval(pollInterval);
         this.subscriptions.delete(subId);
       },
     };
 
-    this.subscriptions.set(subId, subscription);
-    return subscription;
-  }
-
-  /**
-   * Subscribe to ALL trading activity across all markets (no filtering)
-   * This is useful for Copy Trading - monitoring Smart Money across the platform
-   * @param handlers - Event handlers
-   */
-  subscribeAllActivity(handlers: ActivityHandlers = {}): Subscription {
-    return this.subscribeActivity({}, handlers);
-  }
-
-  // ============================================================================
-  // Crypto Price Subscriptions
-  // ============================================================================
-
-  /**
-   * Subscribe to crypto price updates
-   * @param symbols - Array of symbols (e.g., ['BTCUSDT', 'ETHUSDT'])
-   * @param handlers - Event handlers
-   */
-  subscribeCryptoPrices(symbols: string[], handlers: CryptoPriceHandlers = {}): Subscription {
-    const subId = `crypto_${++this.subscriptionIdCounter}`;
-
-    // Subscribe to each symbol
-    const subscriptions = symbols.map(symbol => ({
-      topic: 'crypto_prices',
-      type: 'update',
-      filters: JSON.stringify({ symbol }),
-    }));
-
-    this.sendSubscription({ subscriptions });
-
-    const handler = (price: CryptoPrice) => {
-      if (symbols.includes(price.symbol)) {
-        handlers.onPrice?.(price);
-      }
-    };
-    this.on('cryptoPrice', handler);
-
-    const subscription: Subscription = {
-      id: subId,
-      topic: 'crypto_prices',
-      type: 'update',
-      unsubscribe: () => {
-        this.off('cryptoPrice', handler);
-        this.sendUnsubscription({ subscriptions });
-        this.subscriptions.delete(subId);
-      },
-    };
-
-    this.subscriptions.set(subId, subscription);
-    return subscription;
-  }
-
-  /**
-   * Subscribe to Chainlink crypto prices
-   * @param symbols - Array of symbols (e.g., ['ETH/USD', 'BTC/USD'])
-   */
-  subscribeCryptoChainlinkPrices(symbols: string[], handlers: CryptoPriceHandlers = {}): Subscription {
-    const subId = `crypto_chainlink_${++this.subscriptionIdCounter}`;
-
-    const subscriptions = symbols.map(symbol => ({
-      topic: 'crypto_prices_chainlink',
-      type: 'update',
-      filters: JSON.stringify({ symbol }),
-    }));
-
-    const subMsg = { subscriptions };
-    this.sendSubscription(subMsg);
-    this.subscriptionMessages.set(subId, subMsg);  // Store for reconnection
-
-    const handler = (price: CryptoPrice) => {
-      if (symbols.includes(price.symbol)) {
-        handlers.onPrice?.(price);
-      }
-    };
-    this.on('cryptoChainlinkPrice', handler);
-
-    const subscription: Subscription = {
-      id: subId,
-      topic: 'crypto_prices_chainlink',
-      type: 'update',
-      unsubscribe: () => {
-        this.off('cryptoChainlinkPrice', handler);
-        this.sendUnsubscription({ subscriptions });
-        this.subscriptions.delete(subId);
-        this.subscriptionMessages.delete(subId);  // Remove from reconnection list
-      },
-    };
-
-    this.subscriptions.set(subId, subscription);
-    return subscription;
-  }
-
-  // ============================================================================
-  // Equity Price Subscriptions
-  // ============================================================================
-
-  /**
-   * Subscribe to equity price updates
-   * @param symbols - Array of symbols (e.g., ['AAPL', 'GOOGL'])
-   * @param handlers - Event handlers
-   */
-  subscribeEquityPrices(symbols: string[], handlers: EquityPriceHandlers = {}): Subscription {
-    const subId = `equity_${++this.subscriptionIdCounter}`;
-
-    const subscriptions = symbols.map(symbol => ({
-      topic: 'equity_prices',
-      type: 'update',
-      filters: JSON.stringify({ symbol }),
-    }));
-
-    this.sendSubscription({ subscriptions });
-
-    const handler = (price: EquityPrice) => {
-      if (symbols.includes(price.symbol)) {
-        handlers.onPrice?.(price);
-      }
-    };
-    this.on('equityPrice', handler);
-
-    const subscription: Subscription = {
-      id: subId,
-      topic: 'equity_prices',
-      type: 'update',
-      unsubscribe: () => {
-        this.off('equityPrice', handler);
-        this.sendUnsubscription({ subscriptions });
-        this.subscriptions.delete(subId);
-      },
-    };
-
-    this.subscriptions.set(subId, subscription);
-    return subscription;
-  }
-
-  // ============================================================================
-  // Comments Subscriptions
-  // ============================================================================
-
-  /**
-   * Subscribe to comment and reaction events
-   */
-  subscribeComments(
-    filter: { parentEntityId: number; parentEntityType: 'Event' | 'Series' },
-    handlers: {
-      onComment?: (comment: Comment) => void;
-      onReaction?: (reaction: Reaction) => void;
-    } = {}
-  ): Subscription {
-    const subId = `comments_${++this.subscriptionIdCounter}`;
-    const filterStr = JSON.stringify({
-      parentEntityID: filter.parentEntityId,
-      parentEntityType: filter.parentEntityType,
-    });
-
-    const subscriptions = [
-      { topic: 'comments', type: 'comment_created', filters: filterStr },
-      { topic: 'comments', type: 'comment_removed', filters: filterStr },
-      { topic: 'comments', type: 'reaction_created', filters: filterStr },
-      { topic: 'comments', type: 'reaction_removed', filters: filterStr },
-    ];
-
-    this.sendSubscription({ subscriptions });
-
-    const commentHandler = (comment: Comment) => handlers.onComment?.(comment);
-    const reactionHandler = (reaction: Reaction) => handlers.onReaction?.(reaction);
-
-    this.on('comment', commentHandler);
-    this.on('reaction', reactionHandler);
-
-    const subscription: Subscription = {
-      id: subId,
-      topic: 'comments',
-      type: '*',
-      unsubscribe: () => {
-        this.off('comment', commentHandler);
-        this.off('reaction', reactionHandler);
-        this.sendUnsubscription({ subscriptions });
-        this.subscriptions.delete(subId);
-      },
-    };
-
-    this.subscriptions.set(subId, subscription);
-    return subscription;
-  }
-
-  // ============================================================================
-  // RFQ Subscriptions
-  // ============================================================================
-
-  /**
-   * Subscribe to RFQ (Request for Quote) events
-   */
-  subscribeRFQ(handlers: {
-    onRequest?: (request: RFQRequest) => void;
-    onQuote?: (quote: RFQQuote) => void;
-  } = {}): Subscription {
-    const subId = `rfq_${++this.subscriptionIdCounter}`;
-
-    const subscriptions = [
-      { topic: 'rfq', type: 'request_created' },
-      { topic: 'rfq', type: 'request_edited' },
-      { topic: 'rfq', type: 'request_canceled' },
-      { topic: 'rfq', type: 'request_expired' },
-      { topic: 'rfq', type: 'quote_created' },
-      { topic: 'rfq', type: 'quote_edited' },
-      { topic: 'rfq', type: 'quote_canceled' },
-      { topic: 'rfq', type: 'quote_expired' },
-    ];
-
-    this.sendSubscription({ subscriptions });
-
-    const requestHandler = (request: RFQRequest) => handlers.onRequest?.(request);
-    const quoteHandler = (quote: RFQQuote) => handlers.onQuote?.(quote);
-
-    this.on('rfqRequest', requestHandler);
-    this.on('rfqQuote', quoteHandler);
-
-    const subscription: Subscription = {
-      id: subId,
-      topic: 'rfq',
-      type: '*',
-      unsubscribe: () => {
-        this.off('rfqRequest', requestHandler);
-        this.off('rfqQuote', quoteHandler);
-        this.sendUnsubscription({ subscriptions });
-        this.subscriptions.delete(subId);
-      },
-    };
-
-    this.subscriptions.set(subId, subscription);
+    this.subscriptions.set(subId, subscription as MarketSubscription);
     return subscription;
   }
 
@@ -890,308 +830,66 @@ export class RealtimeServiceV2 extends EventEmitter {
       sub.unsubscribe();
     }
     this.subscriptions.clear();
-    this.subscriptionMessages.clear();  // Clear reconnection list
+    this.handlerRegistry.clear();
   }
 
   // ============================================================================
-  // Private Methods
+  // Private Methods - Parsers
   // ============================================================================
 
-  private handleConnect(client: RealTimeDataClient): void {
-    this.connected = true;
-    this.log('Connected to WebSocket server');
-
-    // Re-subscribe to all active subscriptions on reconnect
-    if (this.subscriptionMessages.size > 0) {
-      this.log(`Re-subscribing to ${this.subscriptionMessages.size} subscriptions...`);
-      for (const [subId, msg] of this.subscriptionMessages) {
-        this.log(`Re-subscribing: ${subId}`);
-        this.client?.subscribe(msg);
-      }
-    }
-
-    this.emit('connected');
-  }
-
-  private handleStatusChange(status: ConnectionStatus): void {
-    this.log(`Connection status: ${status}`);
-
-    if (status === ConnectionStatus.DISCONNECTED) {
-      this.connected = false;
-      this.emit('disconnected');
-    } else if (status === ConnectionStatus.CONNECTED) {
-      this.connected = true;
-    }
-
-    this.emit('statusChange', status);
-  }
-
-  private handleMessage(client: RealTimeDataClient, message: Message): void {
-    this.log(`Received: ${message.topic}:${message.type}`);
-
-    const payload = message.payload as Record<string, unknown>;
-
-    switch (message.topic) {
-      case 'clob_market':
-        this.handleMarketMessage(message.type, payload, message.timestamp);
-        break;
-
-      case 'clob_user':
-        this.handleUserMessage(message.type, payload, message.timestamp);
-        break;
-
-      case 'activity':
-        this.handleActivityMessage(message.type, payload, message.timestamp);
-        break;
-
-      case 'crypto_prices':
-        this.handleCryptoPriceMessage(payload, message.timestamp);
-        break;
-
-      case 'crypto_prices_chainlink':
-        this.handleCryptoChainlinkPriceMessage(payload, message.timestamp);
-        break;
-
-      case 'equity_prices':
-        this.handleEquityPriceMessage(payload, message.timestamp);
-        break;
-
-      case 'comments':
-        this.handleCommentMessage(message.type, payload, message.timestamp);
-        break;
-
-      case 'rfq':
-        this.handleRFQMessage(message.type, payload, message.timestamp);
-        break;
-
-      default:
-        this.log(`Unknown topic: ${message.topic}`);
-    }
-  }
-
-  private handleMarketMessage(type: string, payload: Record<string, unknown>, timestamp: number): void {
-    switch (type) {
-      case 'agg_orderbook': {
-        const book = this.parseOrderbook(payload, timestamp);
-        this.bookCache.set(book.assetId, book);
-        this.emit('orderbook', book);
-        break;
-      }
-
-      case 'price_change': {
-        const change = this.parsePriceChange(payload, timestamp);
-        this.emit('priceChange', change);
-        break;
-      }
-
-      case 'last_trade_price': {
-        const trade = this.parseLastTrade(payload, timestamp);
-        this.lastTradeCache.set(trade.assetId, trade);
-        this.emit('lastTrade', trade);
-        break;
-      }
-
-      case 'tick_size_change': {
-        const change = this.parseTickSizeChange(payload, timestamp);
-        this.emit('tickSizeChange', change);
-        break;
-      }
-
-      case 'market_created':
-      case 'market_resolved': {
-        const event: MarketEvent = {
-          conditionId: payload.condition_id as string || '',
-          type: type === 'market_created' ? 'created' : 'resolved',
-          data: payload,
-          timestamp,
-        };
-        this.emit('marketEvent', event);
-        break;
-      }
-    }
-  }
-
-  private handleUserMessage(type: string, payload: Record<string, unknown>, timestamp: number): void {
-    if (type === 'order') {
-      const order: UserOrder = {
-        orderId: payload.order_id as string || '',
-        market: payload.market as string || '',
-        asset: payload.asset as string || '',
-        side: payload.side as 'BUY' | 'SELL',
-        price: Number(payload.price) || 0,
-        originalSize: Number(payload.original_size) || 0,
-        matchedSize: Number(payload.matched_size) || 0,
-        eventType: payload.event_type as 'PLACEMENT' | 'UPDATE' | 'CANCELLATION',
-        timestamp,
-      };
-      this.emit('userOrder', order);
-    } else if (type === 'trade') {
-      const trade: UserTrade = {
-        tradeId: payload.trade_id as string || '',
-        market: payload.market as string || '',
-        outcome: payload.outcome as string || '',
-        price: Number(payload.price) || 0,
-        size: Number(payload.size) || 0,
-        side: payload.side as 'BUY' | 'SELL',
-        status: payload.status as 'MATCHED' | 'MINED' | 'CONFIRMED' | 'RETRYING' | 'FAILED',
-        timestamp,
-        transactionHash: payload.transaction_hash as string | undefined,
-      };
-      this.emit('userTrade', trade);
-    }
-  }
-
-  private handleActivityMessage(type: string, payload: Record<string, unknown>, timestamp: number): void {
-    const trade: ActivityTrade = {
-      asset: payload.asset as string || '',
-      conditionId: payload.conditionId as string || '',
-      eventSlug: payload.eventSlug as string || '',
-      marketSlug: payload.slug as string || '',
-      outcome: payload.outcome as string || '',
-      price: Number(payload.price) || 0,
-      side: payload.side as 'BUY' | 'SELL',
-      size: Number(payload.size) || 0,
-      timestamp: this.normalizeTimestamp(payload.timestamp) || timestamp,
-      transactionHash: payload.transactionHash as string || '',
-      trader: {
-        name: payload.name as string | undefined,
-        address: payload.proxyWallet as string | undefined,
-      },
-    };
-    this.emit('activityTrade', trade);
-  }
-
-  private handleCryptoPriceMessage(payload: Record<string, unknown>, timestamp: number): void {
-    const price: CryptoPrice = {
-      symbol: payload.symbol as string || '',
-      price: Number(payload.value) || 0,
-      timestamp: this.normalizeTimestamp(payload.timestamp) || timestamp,
-    };
-    this.emit('cryptoPrice', price);
-  }
-
-  private handleCryptoChainlinkPriceMessage(payload: Record<string, unknown>, timestamp: number): void {
-    const price: CryptoPrice = {
-      symbol: payload.symbol as string || '',
-      price: Number(payload.value) || 0,
-      timestamp: this.normalizeTimestamp(payload.timestamp) || timestamp,
-    };
-    this.emit('cryptoChainlinkPrice', price);
-  }
-
-  private handleEquityPriceMessage(payload: Record<string, unknown>, timestamp: number): void {
-    const price: EquityPrice = {
-      symbol: payload.symbol as string || '',
-      price: Number(payload.value) || 0,
-      timestamp: this.normalizeTimestamp(payload.timestamp) || timestamp,
-    };
-    this.emit('equityPrice', price);
-  }
-
-  private handleCommentMessage(type: string, payload: Record<string, unknown>, timestamp: number): void {
-    if (type.includes('comment')) {
-      const comment: Comment = {
-        id: payload.id as string || '',
-        parentEntityId: payload.parentEntityID as number || 0,
-        parentEntityType: payload.parentEntityType as 'Event' | 'Series',
-        content: payload.content as string | undefined,
-        author: payload.author as string | undefined,
-        timestamp,
-      };
-      this.emit('comment', comment);
-    } else if (type.includes('reaction')) {
-      const reaction: Reaction = {
-        id: payload.id as string || '',
-        commentId: payload.commentId as string || '',
-        type: payload.type as string || '',
-        author: payload.author as string | undefined,
-        timestamp,
-      };
-      this.emit('reaction', reaction);
-    }
-  }
-
-  private handleRFQMessage(type: string, payload: Record<string, unknown>, timestamp: number): void {
-    if (type.startsWith('request_')) {
-      const status = type.replace('request_', '') as 'created' | 'edited' | 'canceled' | 'expired';
-      const request: RFQRequest = {
-        id: payload.id as string || '',
-        market: payload.market as string || '',
-        side: payload.side as 'BUY' | 'SELL',
-        size: Number(payload.size) || 0,
-        status,
-        timestamp,
-      };
-      this.emit('rfqRequest', request);
-    } else if (type.startsWith('quote_')) {
-      const status = type.replace('quote_', '') as 'created' | 'edited' | 'canceled' | 'expired';
-      const quote: RFQQuote = {
-        id: payload.id as string || '',
-        requestId: payload.request_id as string || '',
-        price: Number(payload.price) || 0,
-        size: Number(payload.size) || 0,
-        status,
-        timestamp,
-      };
-      this.emit('rfqQuote', quote);
-    }
-  }
-
-  // Parsers
-
-  private parseOrderbook(payload: Record<string, unknown>, timestamp: number): OrderbookSnapshot {
-    const bidsRaw = payload.bids as Array<{ price: string; size: string }> || [];
-    const asksRaw = payload.asks as Array<{ price: string; size: string }> || [];
-
-    // Sort bids descending, asks ascending
-    const bids = bidsRaw
-      .map(l => ({ price: parseFloat(l.price), size: parseFloat(l.size) }))
+  private parseOrderbook(event: ClobOrderBookEvent): OrderbookSnapshot {
+    const bids = (event.bids || [])
+      .map((l) => ({ price: parseFloat(l.price), size: parseFloat(l.size) }))
       .sort((a, b) => b.price - a.price);
 
-    const asks = asksRaw
-      .map(l => ({ price: parseFloat(l.price), size: parseFloat(l.size) }))
+    const asks = (event.asks || [])
+      .map((l) => ({ price: parseFloat(l.price), size: parseFloat(l.size) }))
       .sort((a, b) => a.price - b.price);
 
-    const tokenId = payload.asset_id as string || '';
     return {
-      tokenId,
-      assetId: tokenId, // Backward compatibility
-      market: payload.market as string || '',
+      tokenId: event.asset_id,
+      assetId: event.asset_id,
+      market: event.market,
       bids,
       asks,
-      timestamp: this.normalizeTimestamp(payload.timestamp) || timestamp,
-      tickSize: payload.tick_size as string || '0.01',
-      minOrderSize: payload.min_order_size as string || '1',
-      hash: payload.hash as string || '',
+      timestamp: this.normalizeTimestamp(event.timestamp),
+      tickSize: event.tick_size,
+      minOrderSize: event.min_order_size,
+      hash: '',
     };
   }
 
-  private parsePriceChange(payload: Record<string, unknown>, timestamp: number): PriceChange {
-    const changes = payload.price_changes as Array<{ price: string; size: string }> || [];
+  private parsePriceChange(event: ClobPriceChangeEvent): PriceChange {
     return {
-      assetId: payload.asset_id as string || '',
-      changes,
-      timestamp,
+      assetId: event.asset_id,
+      changes: [{ price: event.price, size: event.size }],
+      timestamp: this.normalizeTimestamp(event.timestamp),
     };
   }
 
-  private parseLastTrade(payload: Record<string, unknown>, timestamp: number): LastTradeInfo {
+  private parseLastTrade(event: ClobLastTradeEvent): LastTradeInfo {
     return {
-      assetId: payload.asset_id as string || '',
-      price: parseFloat(payload.price as string) || 0,
-      side: payload.side as 'BUY' | 'SELL' || 'BUY',
-      size: parseFloat(payload.size as string) || 0,
-      timestamp: this.normalizeTimestamp(payload.timestamp) || timestamp,
+      assetId: event.asset_id,
+      price: parseFloat(event.price),
+      side: event.side,
+      size: parseFloat(event.size),
+      timestamp: this.normalizeTimestamp(event.timestamp),
     };
   }
 
-  private parseTickSizeChange(payload: Record<string, unknown>, timestamp: number): TickSizeChange {
+  private parseTickSizeChange(event: ClobTickSizeChangeEvent): TickSizeChange {
     return {
-      assetId: payload.asset_id as string || '',
-      oldTickSize: payload.old_tick_size as string || '',
-      newTickSize: payload.new_tick_size as string || '',
-      timestamp,
+      assetId: event.asset_id,
+      oldTickSize: event.old_tick_size,
+      newTickSize: event.new_tick_size,
+      timestamp: this.normalizeTimestamp(event.timestamp),
     };
+  }
+
+  private handleBestBidAsk(_event: ClobBestBidAskEvent): void {
+    // Best bid/ask is already included in orderbook.
+    // Emit as priceChange for compatibility
+    // Can be extended if needed
   }
 
   /**
@@ -1224,31 +922,22 @@ export class RealtimeServiceV2 extends EventEmitter {
     };
   }
 
-  private sendSubscription(msg: { subscriptions: Array<{ topic: string; type: string; filters?: string; clob_auth?: ClobApiKeyCreds }> }): void {
-    if (this.client && this.connected) {
-      this.client.subscribe(msg);
-    } else {
-      this.log('Cannot subscribe: not connected');
-    }
-  }
-
-  private sendUnsubscription(msg: { subscriptions: Array<{ topic: string; type: string; filters?: string }> }): void {
-    if (this.client && this.connected) {
-      this.client.unsubscribe(msg);
-    }
-  }
-
-  private log(message: string): void {
-    if (this.config.debug) {
-      console.log(`[RealtimeService] ${message}`);
+  /**
+   * Remove all handlers registered by a subscription
+   */
+  private removeHandlers(subId: string): void {
+    const handlers = this.handlerRegistry.get(subId);
+    if (handlers) {
+      for (const { event, handler } of handlers) {
+        this.off(event, handler as (...args: any[]) => void);
+      }
     }
   }
 
   /**
    * Normalize timestamp to milliseconds
-   * Polymarket WebSocket returns timestamps in seconds, need to convert to milliseconds
    */
-  private normalizeTimestamp(ts: unknown): number {
+  private normalizeTimestamp(ts: string | number | unknown): number {
     if (typeof ts === 'string') {
       const parsed = parseInt(ts, 10);
       if (isNaN(parsed)) return Date.now();
@@ -1260,5 +949,14 @@ export class RealtimeServiceV2 extends EventEmitter {
       return ts < 1e12 ? ts * 1000 : ts;
     }
     return Date.now();
+  }
+
+  /**
+   * Debug logging
+   */
+  private log(message: string): void {
+    if (this.config.debug) {
+      console.log(`[RealtimeService] ${message}`);
+    }
   }
 }

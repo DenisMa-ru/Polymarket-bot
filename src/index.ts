@@ -98,7 +98,7 @@ export type {
 export { MarketService, getIntervalMs as getIntervalMsService } from './services/market-service.js';
 export type { ResolvedMarketTokens } from './services/market-service.js';
 
-// Real-time (V2 - using official @polymarket/real-time-data-client)
+// Real-time (V2 - using new CLOB WebSocket wss://ws-subscriptions-clob.polymarket.com/ws/market)
 export { RealtimeServiceV2 } from './services/realtime-service-v2.js';
 export type {
   RealtimeServiceConfig,
@@ -107,9 +107,9 @@ export type {
   PriceChange,
   TickSizeChange,
   MarketEvent,
+  ActivityTrade,
   UserOrder,
   UserTrade,
-  ActivityTrade,
   CryptoPrice,
   EquityPrice,
   Comment,
@@ -124,6 +124,21 @@ export type {
   CryptoPriceHandlers,
   EquityPriceHandlers,
 } from './services/realtime-service-v2.js';
+
+// CLOB WebSocket Client
+export { ClobWebSocketClient } from './clients/clob-websocket-client.js';
+export type {
+  ClobWSConfig,
+  ClobOrderBookEvent,
+  ClobPriceChangeEvent,
+  ClobLastTradeEvent,
+  ClobBestBidAskEvent,
+  ClobTickSizeChangeEvent,
+  ClobMarketCreatedEvent,
+  ClobMarketResolvedEvent,
+  ClobEventType,
+  ClobEvent,
+} from './clients/clob-websocket-client.js';
 
 // RealtimeService (legacy) has been removed - use RealtimeServiceV2 instead
 
