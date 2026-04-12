@@ -738,22 +738,28 @@ export class RealtimeServiceV2 extends EventEmitter {
           // Skip old trades (already processed)
           if (tradeTimestamp <= lastTimestamp) continue;
 
+          // Data API returns fields in camelCase: proxyWallet, transactionHash, etc.
           const activityTrade: ActivityTrade = {
-            asset: (rawTrade.token_id as string) || '',
-            conditionId: (rawTrade.condition_id as string) || '',
-            eventSlug: (rawTrade.event_slug as string) || '',
-            marketSlug: (rawTrade.slug as string) || '',
+            asset: (rawTrade.asset as string) || (rawTrade.token_id as string) || '',
+            conditionId: (rawTrade.conditionId as string) || (rawTrade.condition_id as string) || '',
+            eventSlug: (rawTrade.eventSlug as string) || (rawTrade.event_slug as string) || '',
+            marketSlug: (rawTrade.slug as string) || (rawTrade.marketSlug as string) || '',
             outcome: (rawTrade.outcome as string) || '',
             price: Number(rawTrade.price) || 0,
             side: (rawTrade.side as 'BUY' | 'SELL') || 'BUY',
             size: Number(rawTrade.size) || 0,
             timestamp: tradeTimestamp,
-            transactionHash: (rawTrade.transaction_hash as string) || '',
+            transactionHash: (rawTrade.transactionHash as string) || (rawTrade.transaction_hash as string) || '',
             trader: {
               name: (rawTrade.name as string) || undefined,
-              address: (rawTrade.proxy_wallet as string) || undefined,
+              // Data API uses proxyWallet (camelCase), not proxy_wallet (snake_case)
+              address: (rawTrade.proxyWallet as string) || (rawTrade.proxy_wallet as string) || undefined,
             },
           };
+
+          if (this.config.debug) {
+            this.log(`Activity trade: ${activityTrade.trader?.address} ${activityTrade.side} ${activityTrade.size} ${activityTrade.outcome}`);
+          }
 
           handlers.onTrade?.(activityTrade);
           this.emit('activityTrade', activityTrade);
