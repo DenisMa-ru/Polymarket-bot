@@ -190,11 +190,19 @@ export class ClobWebSocketClient extends EventEmitter {
     });
 
     this.ws.on('message', (data: WebSocket.Data) => {
+      const text = data.toString();
+
+      // Handle non-JSON error responses gracefully
+      if (!text.startsWith('{')) {
+        this.log(`Non-JSON message received: ${text.slice(0, 200)}`);
+        return;
+      }
+
       try {
-        const message = JSON.parse(data.toString()) as ClobEvent;
+        const message = JSON.parse(text) as ClobEvent;
         this.handleMessage(message);
       } catch (error) {
-        this.emit('error', new Error(`Failed to parse message: ${error}, data: ${data.toString()}`));
+        this.log(`Failed to parse message: ${text.slice(0, 200)}`);
       }
     });
 
@@ -245,14 +253,20 @@ export class ClobWebSocketClient extends EventEmitter {
     assetIds.forEach((id) => this.subscribedAssets.add(id));
 
     if (this.ws?.readyState === WebSocket.OPEN) {
-      const subscriptionMessage = {
-        assets_ids: assetIds,
-        type: 'market',
-        custom_feature_enabled: true,
-      };
+      // Send subscription for each asset individually
+      for (const assetId of assetIds) {
+        const subscriptionMessage = {
+          op: 'subscribe',
+          args: [{
+            topic: 'market',
+            asset_ids: [assetId],
+            custom_feature_enabled: true,
+          }],
+        };
 
-      this.ws.send(JSON.stringify(subscriptionMessage));
-      this.log(`Subscribed to assets: ${assetIds.join(', ')}`);
+        this.ws.send(JSON.stringify(subscriptionMessage));
+        this.log(`Subscribed to asset: ${assetId.slice(0, 20)}...`);
+      }
     } else {
       this.log('Cannot subscribe: WebSocket not connected. Will subscribe on reconnect.');
     }
@@ -320,15 +334,20 @@ export class ClobWebSocketClient extends EventEmitter {
   private resubscribeAll(): void {
     if (this.subscribedAssets.size === 0) return;
 
-    const assetIds = Array.from(this.subscribedAssets);
-    const subscriptionMessage = {
-      assets_ids: assetIds,
-      type: 'market',
-      custom_feature_enabled: true,
-    };
+    // Resubscribe each asset individually
+    for (const assetId of this.subscribedAssets) {
+      const subscriptionMessage = {
+        op: 'subscribe',
+        args: [{
+          topic: 'market',
+          asset_ids: [assetId],
+          custom_feature_enabled: true,
+        }],
+      };
 
-    this.ws!.send(JSON.stringify(subscriptionMessage));
-    this.log(`Resubscribed to ${assetIds.length} assets after reconnect`);
+      this.ws!.send(JSON.stringify(subscriptionMessage));
+    }
+    this.log(`Resubscribed to ${this.subscribedAssets.size} assets after reconnect`);
   }
 
   /**
