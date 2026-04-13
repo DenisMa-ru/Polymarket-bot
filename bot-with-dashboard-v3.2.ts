@@ -383,16 +383,37 @@ async function main() {
   startDashboard(dashboardPort);
   console.log(`   Dashboard running at http://localhost:${dashboardPort}`);
 
+  // 8. Emit initial state and config to dashboard
+  console.log('8️⃣ Connecting to Dashboard...');
+  
+  // Send initial state
+  dashboardEmitter.updateState(state);
+  
+  // Send config
+  dashboardEmitter.updateConfig(CONFIG as BotConfig);
+  
+  // Send initial log
+  dashboardEmitter.log('INFO', 'Bot v3.2 started successfully');
+  dashboardEmitter.log('INFO', `Mode: ${CONFIG.dryRun ? 'DRY RUN' : 'LIVE'}`);
+  dashboardEmitter.log('INFO', `Capital: $${CONFIG.capital.totalUsd}`);
+  dashboardEmitter.log('INFO', `Smart Money: ${CONFIG.smartMoney.enabled ? 'ENABLED' : 'DISABLED'}`);
+  dashboardEmitter.log('INFO', `Scalping: ${CONFIG.scalping.enabled ? 'ENABLED' : 'DISABLED'}`);
+  dashboardEmitter.log('INFO', `Arbitrage: ${CONFIG.arbitrage.enabled ? 'ENABLED' : 'DISABLED'}`);
+
+  console.log('   Dashboard connected');
+
   // 8. Update dashboard with StateManager data
+  console.log('8️⃣ Starting dashboard updates...');
   setInterval(() => {
     const stats = stateManager.getStats();
-    
+
+    // Update state
     state.dailyPnL = stats.dailyPnL || 0;
     state.totalPnL = stats.totalPnL || 0;
     state.consecutiveWins = stats.consecutiveWins || 0;
     state.consecutiveLosses = stats.consecutiveLosses || 0;
     state.tradesExecuted = stats.totalTrades || 0;
-    
+
     // v3.2: Update scalping stats
     if (scalpingService) {
       const scalpingStats = scalpingService.getStats();
@@ -400,8 +421,11 @@ async function main() {
     }
 
     // Emit to dashboard
-    dashboardEmitter.emit('state_update', state);
+    dashboardEmitter.updateState(state);
+    dashboardEmitter.updateConfig(CONFIG as BotConfig);
   }, 5000);
+
+  console.log('   Dashboard updates started (every 5s)');
 
   // 9. Send daily report via Telegram
   setInterval(async () => {
