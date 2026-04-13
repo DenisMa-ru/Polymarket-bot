@@ -362,9 +362,113 @@ async function main() {
 
   // 9. Web commands
   dashboardEmitter.on('command', async (data: any) => {
-    console.log(`📡 Command: ${data.type}`);
+    const command = data.type || data.command;
+    const payload = data.payload || {};
+    console.log(`📡 Command: ${command}`, payload);
 
-    if (data.type === 'update_config' && data.config) {
+    // Toggle strategy on/off from dashboard
+    if (command === 'toggleStrategy') {
+      const { strategy, enabled } = payload;
+      console.log(`   → ${strategy} = ${enabled ? 'ON' : 'OFF'}`);
+
+      if (strategy === 'arbitrage') {
+        CONFIG.arbitrage.enabled = enabled;
+
+        if (enabled && arbitrageService) {
+          try {
+            if (!arbitrageService.isActive()) {
+              dashboardEmitter.log('INFO', `Arbitrage: ON`);
+              const result = await arbitrageService.findAndStart(CONFIG.arbitrage.profitThreshold);
+              if (result) {
+                state.arbitrage.status = 'monitoring';
+                state.arbitrage.lastScan = Date.now();
+                dashboardEmitter.updateStrategyStatus('arbitrage', 'monitoring', result.description);
+                dashboardEmitter.log('ARB', `Started: ${result.description}`);
+              } else {
+                state.arbitrage.status = 'scanning';
+                dashboardEmitter.updateStrategyStatus('arbitrage', 'scanning');
+                dashboardEmitter.log('WARN', 'Arb: No markets found, will retry');
+              }
+            } else {
+              dashboardEmitter.log('INFO', 'Arb: Already running');
+            }
+          } catch (e: any) {
+            dashboardEmitter.log('ERROR', `Arb start failed: ${e.message}`);
+            dashboardEmitter.updateStrategyStatus('arbitrage', 'idle');
+          }
+        } else if (!enabled && arbitrageService) {
+          if (arbitrageService.isActive()) {
+            arbitrageService.stop();
+            state.arbitrage.status = 'idle';
+            dashboardEmitter.updateStrategyStatus('arbitrage', 'idle');
+            dashboardEmitter.log('INFO', 'Arbitrage: OFF');
+          }
+        }
+        dashboardEmitter.updateState(state);
+        dashboardEmitter.updateConfig(CONFIG as BotConfig);
+      }
+
+      if (strategy === 'dipArb') {
+        CONFIG.dipArb.enabled = enabled;
+
+        if (enabled) {
+          try {
+            const dipArbService = sdk.dipArb;
+            if (!dipArbService.isActive()) {
+              dashboardEmitter.log('INFO', `DipArb: ON`);
+              const market = await dipArbService.findAndStart({ coin: CONFIG.dipArb.coins[0] || 'all' });
+              if (market) {
+                state.activeDipArbMarket = market;
+                state.dipArb.marketName = market.name;
+                state.dipArb.status = 'monitoring';
+                dashboardEmitter.updateStrategyStatus('dipArb', 'monitoring', market.name);
+                dashboardEmitter.log('SIGNAL', `DipArb started: ${market.name}`);
+              } else {
+                state.dipArb.status = 'idle';
+                dashboardEmitter.updateStrategyStatus('dipArb', 'idle');
+                dashboardEmitter.log('WARN', 'DipArb: No market found');
+              }
+            } else {
+              dashboardEmitter.log('INFO', 'DipArb: Already running');
+            }
+          } catch (e: any) {
+            dashboardEmitter.log('ERROR', `DipArb start failed: ${e.message}`);
+            dashboardEmitter.updateStrategyStatus('dipArb', 'idle');
+          }
+        } else {
+          try {
+            const dipArbService = sdk.dipArb;
+            if (dipArbService.isActive()) {
+              await dipArbService.stop();
+              state.dipArb.status = 'idle';
+              state.dipArb.marketName = null;
+              dashboardEmitter.updateStrategyStatus('dipArb', 'idle');
+              dashboardEmitter.log('INFO', 'DipArb: OFF');
+            }
+          } catch (e: any) {
+            dashboardEmitter.log('ERROR', `DipArb stop failed: ${e.message}`);
+          }
+        }
+        dashboardEmitter.updateState(state);
+        dashboardEmitter.updateConfig(CONFIG as BotConfig);
+      }
+
+      if (strategy === 'smartMoney') {
+        CONFIG.smartMoney.enabled = enabled;
+        dashboardEmitter.log('INFO', `Smart Money: ${enabled ? 'ON' : 'OFF'}`);
+        dashboardEmitter.updateStrategyStatus('smartMoney', enabled ? 'active' : 'idle');
+        dashboardEmitter.updateConfig(CONFIG as BotConfig);
+      }
+
+      dashboardEmitter.updateState(state);
+    }
+
+    if (command === 'toggleDryRun' || data.type === 'toggle_dry_run') {
+      CONFIG.dryRun = !CONFIG.dryRun;
+      dashboardEmitter.log('WARN', `Mode: ${CONFIG.dryRun ? 'DRY RUN' : 'LIVE'}`);
+    }
+
+    if (command === 'update_config' && data.config) {
       if (data.config.capital?.totalUsd) {
         CONFIG.capital.totalUsd = data.config.capital.totalUsd;
         dashboardEmitter.log('INFO', `Capital: $${CONFIG.capital.totalUsd}`);
@@ -382,11 +486,6 @@ async function main() {
         dashboardEmitter.log('INFO', `DipArb: ${CONFIG.dipArb.enabled ? 'ON' : 'OFF'}`);
       }
       dashboardEmitter.updateConfig(CONFIG as BotConfig);
-    }
-
-    if (data.type === 'toggle_dry_run') {
-      CONFIG.dryRun = !CONFIG.dryRun;
-      dashboardEmitter.log('WARN', `Mode: ${CONFIG.dryRun ? 'DRY RUN' : 'LIVE'}`);
     }
   });
 
