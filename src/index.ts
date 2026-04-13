@@ -18,6 +18,15 @@ export * from './core/types.js';
 export type { UnifiedCache } from './core/unified-cache.js';
 export { createUnifiedCache } from './core/unified-cache.js';
 
+// State management
+export { StateManager, stateManager } from './core/state-manager.js';
+export type {
+  PendingOrder,
+  DailyStats,
+  TradeHistory,
+  BotState,
+} from './core/state-manager.js';
+
 // API Clients
 export { DataApiClient } from './clients/data-api.js';
 export type {
@@ -100,6 +109,12 @@ export type { ResolvedMarketTokens } from './services/market-service.js';
 
 // Real-time (V2 - using new CLOB WebSocket wss://ws-subscriptions-clob.polymarket.com/ws/market)
 export { RealtimeServiceV2 } from './services/realtime-service-v2.js';
+export { ScalpingService } from './services/scalping-service.js';
+export { SmartMoneyServiceV2 } from './services/smart-money-service-v2.js';
+export { GammaMarketService } from './services/gamma-market-service.js';
+export { TelegramService, telegramService, createTelegramServiceFromEnv } from './services/telegram-service.js';
+export { TelegramCommandHandler } from './services/telegram-command-handler.js';
+export { Backtester, createRSIStrategy } from './core/backtester.js';
 export type {
   RealtimeServiceConfig,
   OrderbookSnapshot,
