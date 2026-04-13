@@ -206,18 +206,26 @@ async function main() {
       sdk.tradingService,
       sdk.smartMoney,
       {
+        // Which wallets to follow
+        targetAddresses: CONFIG.smartMoney.customWallets.length > 0
+          ? CONFIG.smartMoney.customWallets
+          : undefined,
+        topN: CONFIG.smartMoney.customWallets.length === 0 ? CONFIG.smartMoney.topN : undefined,
+        // Sizing
         myCapital: CONFIG.capital.totalUsd,
         enableDynamicSizing: CONFIG.risk.enableDynamicSizing,
         minPositionSize: CONFIG.capital.minOrderUsd,
         maxPositionSize: CONFIG.capital.totalUsd * CONFIG.capital.maxPerTradePct,
         maxSizePerTrade: CONFIG.smartMoney.maxSizePerTrade,
         maxSlippage: CONFIG.smartMoney.maxSlippage,
+        // TP/SL
         enableTakeProfit: true,
         takeProfitPercent: 0.30,
         enableStopLoss: true,
         stopLossPercent: 0.15,
         enableTrailingStop: true,
         trailingStopPercent: 0.10,
+        // Callbacks
         onTrade: async (trade: any, result: any) => {
           console.log(`🐋 Copy: ${trade.side} ${trade.outcome} @ ${trade.price} | $${trade.size}`);
           dashboardEmitter.log('TRADE', `Copy: ${trade.side} ${trade.outcome} @ ${trade.price}`);
