@@ -16,6 +16,8 @@ import {
   SwapService,
   type SmartMoneyTrade,
   OnchainService,
+  stateManager,
+  telegramService,
 } from './src/index.js';
 import { CTFClient } from './src/clients/ctf-client.js';
 import { startDashboard, dashboardEmitter } from './src/dashboard/index.js';
@@ -1007,12 +1009,60 @@ async function setupPortfolioManager(sdk: PolymarketSDK) {
 async function main() {
   console.clear();
   console.log('╔════════════════════════════════════════════════════════════════════╗');
-  console.log('║          POLYMARKET BOT v3.0 + DASHBOARD                           ║');
+  console.log('║          POLYMARKET BOT v3.2 + DASHBOARD + STATE MANAGER          ║');
   console.log('╚════════════════════════════════════════════════════════════════════╝\n');
+
+  // v3.2: Initialize StateManager
+  console.log('💾 Initializing StateManager...');
+  await stateManager.initialize();
+  const savedState = stateManager.getStats();
+  if (savedState.activePositions > 0) {
+    console.log(`   ✅ Restored ${savedState.activePositions} positions`);
+  }
+  console.log('');
+
+  // v3.2: Initialize Telegram
+  console.log('📱 Initializing Telegram...');
+  const telegramOk = await telegramService.initialize();
+  console.log(`   ${telegramOk ? '✅ Enabled' : '⚠️ Disabled (set TELEGRAM_ENABLED=true)'}\n`);
+
+  if (telegramOk) {
+    await telegramService.notify('bot_started', {
+      capital: CONFIG.capital.totalUsd,
+      dryRun: CONFIG.dryRun,
+    });
+  }
 
   // Start Dashboard Server
   startDashboard(3001);
   console.log('\n🌐 Dashboard: http://localhost:3001\n');
+
+  // v3.2: Web config handler
+  dashboardEmitter.on('command', async (data: any) => {
+    if (data.type === 'update_config' && data.config) {
+      console.log(`📡 Config update: ${JSON.stringify(data.config)}`);
+      if (data.config.capital?.totalUsd) {
+        CONFIG.capital.totalUsd = data.config.capital.totalUsd;
+        log('INFO', `Capital updated: $${CONFIG.capital.totalUsd}`);
+      }
+      if (data.config.smartMoney?.enabled !== undefined) {
+        CONFIG.smartMoney.enabled = data.config.smartMoney.enabled;
+        log('INFO', `Smart Money: ${CONFIG.smartMoney.enabled ? 'ENABLED' : 'DISABLED'}`);
+      }
+      if (data.config.arbitrage?.enabled !== undefined) {
+        CONFIG.arbitrage.enabled = data.config.arbitrage.enabled;
+        log('INFO', `Arbitrage: ${CONFIG.arbitrage.enabled ? 'ENABLED' : 'DISABLED'}`);
+      }
+      if (data.config.dipArb?.enabled !== undefined) {
+        CONFIG.dipArb.enabled = data.config.dipArb.enabled;
+        log('INFO', `DipArb: ${CONFIG.dipArb.enabled ? 'ENABLED' : 'DISABLED'}`);
+      }
+      dashboardEmitter.updateConfig({
+        ...dashboardConfig,
+        ...data.config,
+      });
+    }
+  });
 
   if (!process.env.POLYMARKET_PRIVATE_KEY) {
     log('ERROR', 'POLYMARKET_PRIVATE_KEY not found');
@@ -1372,12 +1422,35 @@ async function main() {
   });
 
   process.on('SIGINT', async () => {
-    console.log('\n\nShutting down...');
+    console.log('\n\n🛑 Shutting down...');
+    
+    // v3.2: Telegram notification
+    await telegramService.notify('bot_stopped', {
+      totalTrades: state.tradesExecuted,
+      totalPnL: state.totalPnL,
+    });
+    
+    // v3.2: Save state
+    await stateManager.shutdown();
+    
     if (arbService) await arbService.stop();
     await sdk.dipArb.stop();
     sdk.stop();
     process.exit(0);
   });
+
+  // v3.2: Periodic state updates
+  setInterval(async () => {
+    const stats = stateManager.getStats();
+    state.totalPnL = stats.totalPnL || 0;
+    state.dailyPnL = stats.dailyPnL || 0;
+    state.consecutiveWins = stats.consecutiveWins || 0;
+    state.consecutiveLosses = stats.consecutiveLosses || 0;
+    state.tradesExecuted = stats.totalTrades || 0;
+    
+    dashboardEmitter.updateState(state);
+    dashboardEmitter.updateConfig(dashboardConfig);
+  }, 5000);
 
   log('INFO', '🚀 Bot + Dashboard running! Press Ctrl+C to stop.\n');
 
