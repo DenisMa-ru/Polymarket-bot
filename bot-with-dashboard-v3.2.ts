@@ -379,13 +379,9 @@ async function main() {
 
   // 7. Start Dashboard
   console.log('7️⃣ Starting Dashboard...');
-  await startDashboard(state, {
-    mode: CONFIG.dryRun ? 'DRY_RUN' : 'LIVE',
-    onModeChange: async (newMode) => {
-      CONFIG.dryRun = newMode === 'DRY_RUN';
-      console.log(`Mode changed to: ${newMode}`);
-    },
-  });
+  const dashboardPort = 3001;
+  startDashboard(dashboardPort);
+  console.log(`   Dashboard running at http://localhost:${dashboardPort}`);
 
   // 8. Update dashboard with StateManager data
   setInterval(() => {
