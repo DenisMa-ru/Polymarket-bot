@@ -18,6 +18,7 @@ import {
   OnchainService,
   stateManager,
   telegramService,
+  ScalpingService,
 } from './src/index.js';
 import { CTFClient } from './src/clients/ctf-client.js';
 import { startDashboard, dashboardEmitter } from './src/dashboard/index.js';
@@ -1190,9 +1191,50 @@ async function main() {
   await setupArbitrage(sdk);
   await setupDipArb(sdk);
 
+  // v3.2: Setup Scalping Service
+  let scalpingService: ScalpingService | null = null;
+  if (CONFIG.scalping?.enabled) {
+    log('INFO', '⚡ Setting up Scalping Service...');
+    scalpingService = new ScalpingService(stateManager, sdk.tradingService, {
+      myCapital: CONFIG.capital.totalUsd,
+      maxPositionSize: CONFIG.scalping.maxPositionSize || 5,
+      minPositionSize: CONFIG.scalping.minPositionSize || 3,
+      categories: ['crypto', 'sports'],
+      maxExpiryMinutes: CONFIG.scalping.maxExpiryMinutes || 15,
+      minExpiryMinutes: CONFIG.scalping.minExpiryMinutes || 5,
+      minVolume24h: 1000,
+      indicators: {
+        rsi: { period: 14, oversold: 30, overbought: 70 },
+        volume: { minRatio: 1.5 },
+        macd: { fast: 12, slow: 26, signal: 9 },
+      },
+      entryRules: {
+        minConfidence: 70,
+        requireVolumeSpike: true,
+        requireRsiDivergence: false,
+      },
+      takeProfit: CONFIG.scalping.takeProfit || 0.15,
+      stopLoss: CONFIG.scalping.stopLoss || 0.10,
+      maxHoldTime: CONFIG.scalping.maxHoldTime || 300,
+      maxConcurrentPositions: 5,
+      maxTradesPerHour: CONFIG.scalping.maxTradesPerHour || 20,
+      cooldownAfterTrade: 60,
+      dryRun: CONFIG.dryRun,
+    });
+    await scalpingService.start();
+    log('INFO', '⚡ Scalping Service started');
+  }
+
   // Periodic state update
-  setInterval(() => {
+  setInterval(async () => {
     updateDashboard();
+    
+    // v3.2: Update scalping stats
+    if (scalpingService) {
+      const scalpingStats = scalpingService.getStats();
+      state.scalpingTrades = scalpingStats.totalTrades || 0;
+      stateManager.getStats(); // Trigger save
+    }
   }, 5000);
 
   // Setup Direct Trading
