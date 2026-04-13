@@ -272,6 +272,8 @@ async function main() {
     const scanResult = await arbitrageService.findAndStart(CONFIG.arbitrage.profitThreshold);
     if (scanResult) {
       console.log(`   ✅ Scanning: ${scanResult.description}`);
+      state.arbitrage.status = 'monitoring';
+      state.arbitrage.lastScan = Date.now();
       dashboardEmitter.log('ARB', `Arb monitor started: ${scanResult.description}`);
 
       // Listen for opportunities
@@ -285,8 +287,16 @@ async function main() {
         state.arbitrage.status = arb.type === 'long' ? 'long_arb' : 'short_arb';
         dashboardEmitter.updateState(state);
       });
+
+      // Listen for orderbook updates to show in dashboard
+      arbitrageService.on('orderbookUpdate', (ob: any) => {
+        // Update arbitrage state with latest orderbook
+        state.arbitrage.lastScan = Date.now();
+        dashboardEmitter.updateState(state);
+      });
     } else {
       console.log('   ⚠️ No profitable markets found');
+      state.arbitrage.status = 'scanning';
       dashboardEmitter.log('WARN', 'Arb: No profitable markets found');
     }
   }
@@ -304,31 +314,46 @@ async function main() {
     if (market) {
       console.log(`   ✅ Monitoring: ${market.name}`);
       state.activeDipArbMarket = market;
+      state.dipArb.marketName = market.name;
+      state.dipArb.underlying = market.underlying;
+      state.dipArb.duration = market.durationMinutes;
+      state.dipArb.status = 'monitoring';
       dashboardEmitter.log('SIGNAL', `DipArb monitor started: ${market.name}`);
+
+      // Listen for orderbook updates - THIS IS THE KEY FOR DASHBOARD DISPLAY
+      dipArbService.on('orderbookUpdate', (data: any) => {
+        state.dipArb.upPrice = data.upPrice || 0;
+        state.dipArb.downPrice = data.downPrice || 0;
+        state.dipArb.sum = data.sum || 0;
+        state.dipArb.lastSignal = Date.now();
+        dashboardEmitter.updateState(state);
+      });
 
       // Listen for signals
       dipArbService.on('signal', async (signal: any) => {
         console.log(`📉 DipArb: ${signal.side} ${signal.roundId}`);
         dashboardEmitter.log('SIGNAL', `DipArb: ${signal.side}`);
         state.dipArbTrades++;
+        state.dipArb.status = 'signal';
         dashboardEmitter.updateState(state);
       });
 
-      dipArbService.on('leg1', async (result: any) => {
-        console.log(`📊 DipArb Leg1 filled: ${result.side}`);
-        dashboardEmitter.log('TRADE', `DipArb Leg1: ${result.side} @ ${result.price}`);
-        state.dipArb.status = 'leg1_filled';
+      // Listen for execution results
+      dipArbService.on('execution', async (result: any) => {
+        console.log(`📊 DipArb execution: ${result.leg} ${result.success ? 'OK' : 'FAIL'}`);
+        dashboardEmitter.log('TRADE', `DipArb ${result.leg}: ${result.success ? 'filled' : 'failed'}`);
+        state.dipArb.status = result.leg === 'leg2' ? 'completed' : 'leg1_filled';
         dashboardEmitter.updateState(state);
       });
 
-      dipArbService.on('leg2', async (result: any) => {
-        console.log(`📊 DipArb Leg2 filled: ${result.side}`);
-        dashboardEmitter.log('TRADE', `DipArb Leg2: ${result.side} @ ${result.price}`);
-        state.dipArb.status = 'completed';
+      // Listen for new rounds
+      dipArbService.on('newRound', async (round: any) => {
+        state.dipArb.endTime = round.endTime;
         dashboardEmitter.updateState(state);
       });
     } else {
       console.log('   ⚠️ No suitable DipArb market found');
+      state.dipArb.status = 'idle';
       dashboardEmitter.log('WARN', 'DipArb: No suitable market found');
     }
   }
@@ -384,6 +409,20 @@ async function main() {
                 state.arbitrage.lastScan = Date.now();
                 dashboardEmitter.updateStrategyStatus('arbitrage', 'monitoring', result.description);
                 dashboardEmitter.log('ARB', `Started: ${result.description}`);
+
+                // Attach event listeners for dashboard updates
+                arbitrageService.on('opportunity', async (arb: any) => {
+                  state.arbTrades++;
+                  state.arbitrage.opportunitiesFound++;
+                  state.arbitrage.profit = arb.profitPercent;
+                  state.arbitrage.lastScan = Date.now();
+                  dashboardEmitter.log('ARB', `Arb: ${arb.profitPercent}%`);
+                  dashboardEmitter.updateState(state);
+                });
+                arbitrageService.on('orderbookUpdate', () => {
+                  state.arbitrage.lastScan = Date.now();
+                  dashboardEmitter.updateState(state);
+                });
               } else {
                 state.arbitrage.status = 'scanning';
                 dashboardEmitter.updateStrategyStatus('arbitrage', 'scanning');
@@ -420,9 +459,31 @@ async function main() {
               if (market) {
                 state.activeDipArbMarket = market;
                 state.dipArb.marketName = market.name;
+                state.dipArb.underlying = market.underlying;
+                state.dipArb.duration = market.durationMinutes;
                 state.dipArb.status = 'monitoring';
                 dashboardEmitter.updateStrategyStatus('dipArb', 'monitoring', market.name);
                 dashboardEmitter.log('SIGNAL', `DipArb started: ${market.name}`);
+
+                // Attach event listeners for dashboard updates
+                dipArbService.on('orderbookUpdate', (data: any) => {
+                  state.dipArb.upPrice = data.upPrice || 0;
+                  state.dipArb.downPrice = data.downPrice || 0;
+                  state.dipArb.sum = data.sum || 0;
+                  state.dipArb.lastSignal = Date.now();
+                  dashboardEmitter.updateState(state);
+                });
+                dipArbService.on('signal', async (signal: any) => {
+                  state.dipArbTrades++;
+                  state.dipArb.status = 'signal';
+                  dashboardEmitter.log('SIGNAL', `DipArb: ${signal.side}`);
+                  dashboardEmitter.updateState(state);
+                });
+                dipArbService.on('execution', async (result: any) => {
+                  state.dipArb.status = result.leg === 'leg2' ? 'completed' : 'leg1_filled';
+                  dashboardEmitter.log('TRADE', `DipArb ${result.leg}: ${result.success ? 'filled' : 'failed'}`);
+                  dashboardEmitter.updateState(state);
+                });
               } else {
                 state.dipArb.status = 'idle';
                 dashboardEmitter.updateStrategyStatus('dipArb', 'idle');
