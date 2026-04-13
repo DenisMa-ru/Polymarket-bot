@@ -25,6 +25,7 @@ import {
   stateManager,
   telegramService,
 } from './src/index.js';
+import { SmartMoneyServiceV2 } from './src/services/smart-money-service-v2.js';
 import { startDashboard, dashboardEmitter } from './src/dashboard/index.js';
 import type { BotState, BotConfig } from './src/dashboard/types.js';
 
@@ -163,6 +164,7 @@ const state: BotState = {
 
 let sdk: PolymarketSDK;
 let arbitrageService: ArbitrageService | null = null;
+let smartMoneyServiceV2: SmartMoneyServiceV2 | null = null;
 
 // ============================================================================
 // MAIN
@@ -195,19 +197,55 @@ async function main() {
     const wallets = await sdk.smartMoney.getSmartMoneyList(CONFIG.smartMoney.topN);
     console.log(`   Following ${wallets.length} wallets`);
 
-    await sdk.smartMoney.subscribeSmartMoneyTrades(
-      async (trade: any) => {
-        console.log(`🐋 ${trade.side} ${trade.outcome} @ ${trade.price} | $${trade.size}`);
-        dashboardEmitter.log('SIGNAL', `Whale: ${trade.side} ${trade.outcome} @ ${trade.price}`);
-        state.smartMoneyTrades++;
-        dashboardEmitter.updateState(state);
-      },
+    // Initialize trading service
+    await sdk.tradingService.initialize();
+
+    // Create SmartMoneyServiceV2 with auto-copy-trading, TP/SL
+    smartMoneyServiceV2 = new SmartMoneyServiceV2(
+      stateManager,
+      sdk.tradingService,
+      sdk.smartMoney,
       {
-        filterAddresses: CONFIG.smartMoney.customWallets,
-        smartMoneyOnly: true,
+        myCapital: CONFIG.capital.totalUsd,
+        enableDynamicSizing: CONFIG.risk.enableDynamicSizing,
+        minPositionSize: CONFIG.capital.minOrderUsd,
+        maxPositionSize: CONFIG.capital.totalUsd * CONFIG.capital.maxPerTradePct,
+        maxSizePerTrade: CONFIG.smartMoney.maxSizePerTrade,
+        maxSlippage: CONFIG.smartMoney.maxSlippage,
+        enableTakeProfit: true,
+        takeProfitPercent: 0.30,
+        enableStopLoss: true,
+        stopLossPercent: 0.15,
+        enableTrailingStop: true,
+        trailingStopPercent: 0.10,
+        onTrade: async (trade: any, result: any) => {
+          console.log(`🐋 Copy: ${trade.side} ${trade.outcome} @ ${trade.price} | $${trade.size}`);
+          dashboardEmitter.log('TRADE', `Copy: ${trade.side} ${trade.outcome} @ ${trade.price}`);
+          state.smartMoneyTrades++;
+          dashboardEmitter.updateState(state);
+        },
+        onTakeProfit: (position: any, pnl: number) => {
+          console.log(`💰 TP HIT: +$${pnl.toFixed(2)}`);
+          dashboardEmitter.log('TP', `TP: +$${pnl.toFixed(2)}`);
+        },
+        onStopLoss: (position: any, pnl: number) => {
+          console.log(`🛑 SL HIT: -$${Math.abs(pnl).toFixed(2)}`);
+          dashboardEmitter.log('SL', `SL: -$${Math.abs(pnl).toFixed(2)}`);
+        },
+        onTrailingStop: (position: any, pnl: number) => {
+          console.log(`📈 Trailing Stop: +$${pnl.toFixed(2)}`);
+          dashboardEmitter.log('TS', `Trailing: +$${pnl.toFixed(2)}`);
+        },
+        onError: (error: Error) => {
+          console.error(`Smart Money Error:`, error);
+          dashboardEmitter.log('ERROR', `Smart Money: ${error.message}`);
+        },
       }
     );
-    console.log('   ✅ Active');
+
+    // Start enhanced copy-trading
+    await smartMoneyServiceV2.startEnhancedCopyTrading();
+    console.log('   ✅ Auto-Copy Trading Active (TP+30%/SL-15%/Trailing 10%)');
   }
 
   // 5. Arbitrage Strategy
@@ -222,14 +260,27 @@ async function main() {
       dryRun: CONFIG.dryRun,
     });
 
-    await arbitrageService.startArbitrageScanning(async (arb: any) => {
-      console.log(`🔄 Arbitrage found: ${arb.profitPercent}%`);
-      dashboardEmitter.log('ARB', `Arb: ${arb.profitPercent}% profit`);
-      state.arbTrades++;
-      state.arbitrage.opportunitiesFound++;
-      dashboardEmitter.updateState(state);
-    });
-    console.log('   ✅ Scanning');
+    // Use findAndStart to auto-scan and start monitoring the best market
+    const scanResult = await arbitrageService.findAndStart(CONFIG.arbitrage.profitThreshold);
+    if (scanResult) {
+      console.log(`   ✅ Scanning: ${scanResult.description}`);
+      dashboardEmitter.log('ARB', `Arb monitor started: ${scanResult.description}`);
+
+      // Listen for opportunities
+      arbitrageService.on('opportunity', async (arb: any) => {
+        console.log(`🔄 Arbitrage found: ${arb.profitPercent}% | ${arb.description}`);
+        dashboardEmitter.log('ARB', `Arb: ${arb.profitPercent}% - ${arb.description}`);
+        state.arbTrades++;
+        state.arbitrage.opportunitiesFound++;
+        state.arbitrage.profit = arb.profitPercent;
+        state.arbitrage.lastScan = Date.now();
+        state.arbitrage.status = arb.type === 'long' ? 'long_arb' : 'short_arb';
+        dashboardEmitter.updateState(state);
+      });
+    } else {
+      console.log('   ⚠️ No profitable markets found');
+      dashboardEmitter.log('WARN', 'Arb: No profitable markets found');
+    }
   }
 
   // 6. DipArb Strategy
@@ -237,22 +288,41 @@ async function main() {
     console.log('6️⃣ DipArb...');
     const dipArbService = sdk.dipArb;
 
-    await dipArbService.startDipArbMonitoring(
-      {
-        coins: CONFIG.dipArb.coins,
-        shares: CONFIG.dipArb.shares,
-        sumTarget: CONFIG.dipArb.sumTarget,
-        autoRotate: CONFIG.dipArb.autoRotate,
-        autoExecute: CONFIG.dipArb.autoExecute && !CONFIG.dryRun,
-      },
-      async (signal: any) => {
-        console.log(`📉 DipArb: ${signal.coin} ${signal.direction}`);
-        dashboardEmitter.log('SIGNAL', `Dip: ${signal.coin} ${signal.direction}`);
+    // Use findAndStart to auto-find and monitor the best market
+    const market = await dipArbService.findAndStart({
+      coin: CONFIG.dipArb.coins[0] || 'all',
+    });
+
+    if (market) {
+      console.log(`   ✅ Monitoring: ${market.name}`);
+      state.activeDipArbMarket = market;
+      dashboardEmitter.log('SIGNAL', `DipArb monitor started: ${market.name}`);
+
+      // Listen for signals
+      dipArbService.on('signal', async (signal: any) => {
+        console.log(`📉 DipArb: ${signal.side} ${signal.roundId}`);
+        dashboardEmitter.log('SIGNAL', `DipArb: ${signal.side}`);
         state.dipArbTrades++;
         dashboardEmitter.updateState(state);
-      }
-    );
-    console.log('   ✅ Monitoring');
+      });
+
+      dipArbService.on('leg1', async (result: any) => {
+        console.log(`📊 DipArb Leg1 filled: ${result.side}`);
+        dashboardEmitter.log('TRADE', `DipArb Leg1: ${result.side} @ ${result.price}`);
+        state.dipArb.status = 'leg1_filled';
+        dashboardEmitter.updateState(state);
+      });
+
+      dipArbService.on('leg2', async (result: any) => {
+        console.log(`📊 DipArb Leg2 filled: ${result.side}`);
+        dashboardEmitter.log('TRADE', `DipArb Leg2: ${result.side} @ ${result.price}`);
+        state.dipArb.status = 'completed';
+        dashboardEmitter.updateState(state);
+      });
+    } else {
+      console.log('   ⚠️ No suitable DipArb market found');
+      dashboardEmitter.log('WARN', 'DipArb: No suitable market found');
+    }
   }
 
   // 7. Dashboard
@@ -316,6 +386,7 @@ async function main() {
   process.on('SIGINT', async () => {
     console.log('\n🛑 Shutting down...');
     if (arbitrageService) arbitrageService.stop();
+    if (smartMoneyServiceV2) smartMoneyServiceV2.stop();
     await stateManager.shutdown();
     process.exit(0);
   });
